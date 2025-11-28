@@ -1,9 +1,10 @@
-
-
 import os
 import csv
 from datetime import datetime
+from urllib import request
+
 import telebot
+from flask import Flask
 from telebot import types
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
@@ -11,14 +12,16 @@ from oauth2client.service_account import ServiceAccountCredentials
 # ===============================
 # Настройки
 # ===============================
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8590896819:AAFBqrBzbUwKQMSxyORJ1omPOmlWEeZg0QM")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 ADMIN_ID = 5991920990
 
 bot = telebot.TeleBot(BOT_TOKEN)
+app = Flask(__name__)
 user_data = {}
 
 # ===============================
-# Google Sheets (опционально)
+# Google Sheets
 # ===============================
 try:
     scope = [
@@ -29,9 +32,9 @@ try:
     client = gspread.authorize(creds)
     sheet = client.open("telegram bot").sheet1
     connected_to_sheets = True
-    print("Подключение к Google Sheets — УСПЕШНО")
+    print("Sheets OK")
 except Exception as e:
-    print("Google Sheets недоступен:", e)
+    print("Sheets ERROR:", e)
     sheet = None
     connected_to_sheets = False
 
@@ -42,119 +45,100 @@ except Exception as e:
 def start(message):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add(types.KeyboardButton("Оставить заявку"))
-
-    text = (
-        "Привет!\n\n"
-        "Мы команда *FlowPro* — создаём **Telegram-ботов на заказ** для бизнеса.\n\n"
-        "Приём заявок · Автоматизация продаж · Запись клиентов · Интеграция с CRM\n\n"
-        "Нажми кнопку ниже и расскажи, какой бот тебе нужен"
+    bot.send_message(
+        message.chat.id,
+        "Привет! Я — FlowPro Bot.\nНажми кнопку ниже, чтобы оставить заявку.",
+        reply_markup=markup
     )
-    bot.send_message(message.chat.id, text, parse_mode="Markdown", reply_markup=markup)
-
 
 # ===============================
-# Заявка — пошагово
+# Заявка — шаги
 # ===============================
 @bot.message_handler(func=lambda m: m.text == "Оставить заявку")
 def ask_description(message):
     user_data[message.from_user.id] = {}
-    bot.send_message(message.chat.id, "Коротко опиши, какой бот тебе нужен:", reply_markup=types.ReplyKeyboardRemove())
+    bot.send_message(message.chat.id, "Опиши, какой бот нужен:")
     bot.register_next_step_handler(message, get_description)
 
 def get_description(message):
-    user_data[message.from_user.id]['desc'] = message.text.strip() or "Не указано"
+    user_data[message.from_user.id]['desc'] = message.text
     bot.send_message(message.chat.id, "Как тебя зовут?")
     bot.register_next_step_handler(message, get_name)
 
 def get_name(message):
-    user_data[message.from_user.id]['name'] = message.text.strip() or "Не указано"
-
+    user_data[message.from_user.id]['name'] = message.text
     if message.from_user.username:
         user_data[message.from_user.id]['contact'] = f"@{message.from_user.username}"
-        finalize_request(message)
+        finalize(message)
     else:
         markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
         markup.add(types.KeyboardButton("Отправить контакт", request_contact=True))
-        bot.send_message(message.chat.id, "Отправь свой контакт, чтобы мы могли написать:", reply_markup=markup)
+        bot.send_message(message.chat.id, "Отправь свой номер:", reply_markup=markup)
 
 @bot.message_handler(content_types=['contact'])
-def handle_contact(message):
-    phone = message.contact.phone_number if message.contact else "Не указан"
-    user_data[message.from_user.id]['contact'] = phone
-    finalize_request(message)
-
+def save_contact(message):
+    user_data[message.from_user.id]['contact'] = message.contact.phone_number
+    finalize(message)
 
 # ===============================
-# Финализация и запись
+# Финализация
 # ===============================
-def finalize_request(message):
+def finalize(message):
     uid = message.from_user.id
     data = user_data[uid]
 
-    # Сообщение админу
-    admin_text = (
-        f"Новая заявка на бота\n\n"
-        f"Имя: {data.get('name')}\n"
-        f"Контакт: {data.get('contact')}\n"
-        f"Задача: {data.get('desc')}"
+    # сообщение админу
+    bot.send_message(
+        ADMIN_ID,
+        f"Новая заявка\n\nИмя: {data['name']}\nКонтакт: {data['contact']}\nОписание: {data['desc']}"
     )
-    bot.send_message(ADMIN_ID, admin_text)
 
-    # Запись в CSV
-    try:
-        with open("leads.csv", "a", encoding="utf-8", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow([
-                datetime.now().strftime("%Y-%m-%d %H:%M"),
-                data.get('name'),
-                data.get('contact'),
-                data.get('desc')
-            ])
-    except Exception as e:
-        print("Ошибка CSV:", e)
+    # запись в CSV
+    with open("leads.csv", "a", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            datetime.now().strftime("%Y-%m-%d %H:%M"),
+            data['name'], data['contact'], data['desc']
+        ])
 
-    # Запись в Google Sheets
+    # Google Sheets
     if sheet:
         try:
             sheet.append_row([
                 datetime.now().strftime("%Y-%m-%d %H:%M"),
-                data.get('name'),
-                data.get('contact'),
-                data.get('desc')
+                data['name'], data['contact'], data['desc']
             ])
         except Exception as e:
-            print("Ошибка Google Sheets:", e)
+            print("Sheets Append ERROR:", e)
 
-    # Ответ пользователю
+    # ответ пользователю
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add(types.KeyboardButton("Оставить заявку"))
-    bot.send_message(
-        message.chat.id,
-        "Спасибо! Заявка принята.\nСкоро напишу тебе в личку и обсудим твой бот",
-        reply_markup=markup
-    )
+    bot.send_message(message.chat.id, "Заявка принята!", reply_markup=markup)
 
     user_data.pop(uid, None)
 
+# ===============================
+# Webhook (Render)
+# ===============================
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    update = telebot.types.Update.de_json(request.data.decode("utf-8"))
+    bot.process_new_updates([update])
+    return "OK", 200
 
 # ===============================
-# ЗАПУСК — РАБОТАЕТ НА RAILWAY, Render, VPS, Heroku
+# Запуск
 # ===============================
 if __name__ == "__main__":
-    # Уведомление админу при старте
-    status = "и подключён к Google Sheets" if connected_to_sheets else ""
     try:
-        bot.send_message(ADMIN_ID, f"FlowProBot запущен {status}")
+        bot.send_message(ADMIN_ID, "FlowPro Bot запущен!")
     except:
         pass
 
-    print("Бот запущен — работаем на вебхуках")
+    bot.remove_webhook()
+    bot.set_webhook(url=f"{WEBHOOK_URL}/webhook")
 
-    # Полностью совместим с Railway / Render / любой хостинг
     port = int(os.environ.get("PORT", 10000))
-    bot.remove_webhook()                    # на всякий случай
-    bot.run_webhook(
-        listen="0.0.0.0",
-        port=port,
-        webhook_url=""                      # можно оставить пустым
-    )
+    print(f"Запущено на порту {port}")
+    app.run(host="0.0.0.0", port=port)
